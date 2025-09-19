@@ -1,98 +1,166 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# Inventar- & Ausleihverwaltung – Backend (NestJS, Prisma, SQLite)
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+REST-API für Inventar, Ausleihen und Reservierungen.  
+DB mit **Prisma** und **SQLite** (einfach lokal betreibbar). Swagger ist aktiviert.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+## Features / Endpunkte (Auszug)
 
-## Description
+### Items
+- `GET /items` – Liste mit Pagination/Filter/Sortierung  
+  Query: `page, pageSize, sortBy=name|status|categoryName, sortDir=asc|desc, search, categoryId, status`
+- `GET /items/:id` – Detail
+- `POST /items` – anlegen
+- `PUT /items/:id` – updaten
+- `DELETE /items/:id` – entfernen
+- `GET /items/:id/history` – Historie (Audit)
+- `GET /items/:id/availability?from=YYYY-MM-DD&to=YYYY-MM-DD`  
+  → Array von Zeitspannen:  
+  `{ start, end, type: 'LOAN'|'RESERVATION', status?: 'PENDING'|'APPROVED'|'CANCELLED', label? }`
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+### Reservations
+- `GET /reservations` – Liste mit Pagination/Filter/Sortierung  
+- `POST /reservations` – anlegen `{ itemId, start, end, note?, userName? }`
+- `POST /reservations/:id/approve` – genehmigen (Admin)
+- `POST /reservations/:id/cancel` – stornieren (Admin)
 
-## Project setup
+### Loans
+- `POST /loans/issue` – Ausleihe starten `{ itemId, dueAt, note?, userName? }` (Admin)
+- `POST /loans/return` – Rückgabe `{ itemId }` (Admin)
 
+### Categories
+- `GET /categories` – alle Kategorien
+- `POST /categories` – **anlegen** (Admin) `{ name: string }`
+- `DELETE /categories/:id` – **löschen** (Admin)
+
+**Validierung & Verhalten**
+- `name` ist Pflicht (min. 2 Zeichen), DB-seitig i. d. R. **unique**.  
+- Löschen: Entweder
+  - **RESTRICT** (Standard vieler DBs): Löschen schlägt fehl, wenn Items noch referenzieren, **oder**
+  - **SET NULL**: `categoryId` der verknüpften Items wird auf `NULL` gesetzt.  
+  Die Einstellung erfolgt in `schema.prisma` an der Relation, z. B.:
+  ```prisma
+  model Item {
+    id         Int      @id @default(autoincrement())
+    name       String
+    categoryId Int?
+    category   Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull) // ← SetNull/Restrict
+  }
+
+  model Category {
+    id   Int    @id @default(autoincrement())
+    name String @unique
+    items Item[]
+  }
+  ```
+
+**Swagger**: Endpunkte sind unter **/api → Categories** dokumentiert.  
+**Admin**: `POST` und `DELETE` erfordern den Header `x-admin-pin`.
+
+Beispiele:
 ```bash
-$ npm install
+# Liste
+curl http://localhost:3000/categories
+
+# Anlegen (Admin)
+curl -X POST http://localhost:3000/categories \
+  -H "Content-Type: application/json" -H "x-admin-pin: 1234" \
+  -d '{"name":"Allgemein"}'
+
+# Löschen (Admin)
+curl -X DELETE http://localhost:3000/categories/3 -H "x-admin-pin: 1234"
 ```
 
-## Compile and run the project
+### Admin
+- `GET /admin/ping` – prüft Admin-PIN (Header), Response: `{ ok: true }`
+
+> **Admin-Prüfung:** Alle Admin-Aktionen erwarten den Header `x-admin-pin: <PIN>`.  
+> Der Vergleich erfolgt serverseitig mit `ADMIN_PIN` aus `.env`.
+
+## Tech-Stack
+
+- NestJS
+- Prisma ORM
+- SQLite (Datei `prisma/dev.db`)
+- Swagger (OpenAPI) unter `/api`
+
+## Voraussetzungen
+
+- Node.js **≥ 20**
+- npm **≥ 9**
+
+## Setup
 
 ```bash
-# development
-$ npm run start
+# Pakete installieren
+npm install
 
-# watch mode
-$ npm run start:dev
+# .env anlegen
+cp .env.example .env
+# Inhalte z. B.:
+# PORT=3000
+# DATABASE_URL="file:./dev.db"
+# ADMIN_PIN=1234
+# CORS_ORIGIN=http://localhost:4200
 
-# production mode
-$ npm run start:prod
+# Prisma vorbereiten
+npx prisma generate
+npx prisma migrate dev --name init
+# optional Demodaten
+npx ts-node prisma/seed.ts   # oder: npx prisma db seed (falls script hinterlegt)
 ```
 
-## Run tests
+## Entwicklung starten
 
 ```bash
-# unit tests
-$ npm run test
-
-# e2e tests
-$ npm run test:e2e
-
-# test coverage
-$ npm run test:cov
+npm run start:dev
+# API: http://localhost:3000
+# Swagger: http://localhost:3000/api
 ```
 
-## Deployment
+## Validierung
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
+Global aktivierte `ValidationPipe` mit `transform: true` + `enableImplicitConversion`.  
+Dadurch werden Query-Parameter wie `page=0` korrekt nach `number` konvertiert.
 
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+## Datenmodell (Auszug)
+
+- **Item**: `id, name, inventoryNo, status('OK'|'DEFECT'|'OUT'), condition, tagsCsv, categoryId?`
+- **Category**: `id, name`
+- **Loan**: `id, itemId, issuedAt, dueAt, returnedAt?, note?`
+- **Reservation**: `id, itemId, startAt, endAt, status('PENDING'|'APPROVED'|'CANCELLED'), userName?, note?`
+- Optionale **Audit-Logs**: `itemId, action, actor, createdAt`
+
+## Beispiel-Requests
 
 ```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
+# Items durchsuchen
+curl "http://localhost:3000/items?page=0&pageSize=10&search=Ak"
+
+# Reservierung anlegen
+curl -X POST http://localhost:3000/reservations \
+  -H "Content-Type: application/json" \
+  -d '{"itemId":1,"start":"2025-09-16T18:00:00.000Z","end":"2025-09-16T19:00:00.000Z","userName":"user"}'
+
+# Reservierung genehmigen (Admin)
+curl -X POST http://localhost:3000/reservations/1/approve \
+  -H "x-admin-pin: 1234"
+
+# Ausleihe starten (Admin)
+curl -X POST http://localhost:3000/loans/issue \
+  -H "x-admin-pin: 1234" -H "Content-Type: application/json" \
+  -d '{"itemId":1,"dueAt":"2025-09-30T12:00:00.000Z","note":"Bedarf Team"}'
+
+# Verfügbarkeit
+curl "http://localhost:3000/items/1/availability?from=2025-09-15&to=2025-10-06"
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+## Nützliche Dev-Kommandos
 
-## Resources
+```bash
+# Prisma Studio (DB-Viewer)
+npx prisma studio
 
-Check out a few resources that may come in handy when working with NestJS:
-
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
-
-## Support
-
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
-
-## Stay in touch
-
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
-
-## License
-
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+# Datenbank neu aufsetzen (Achtung: zerstörerisch)
+rm -f prisma/dev.db
+npx prisma migrate reset
+```
