@@ -1,0 +1,74 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+enum ItemStatus {
+  OK
+  DEFECT
+  OUT
+}
+
+enum ReservationStatus {
+  REQUESTED
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
+model Category {
+  id    Int    @id @default(autoincrement())
+  name  String @unique
+  items Item[]
+}
+
+model Item {
+  id           Int           @id @default(autoincrement())
+  name         String
+  inventoryNo  String        @unique
+  status       ItemStatus    @default(OK)
+  condition    String        @default("OK")
+  categoryId   Int?
+  category     Category?     @relation(fields: [categoryId], references: [id])
+  // tags als CSV für SQLite-Simplicity
+  tagsCsv      String?       @default("")
+  reservations Reservation[]
+  loans        Loan[]
+  logs         AuditLog[]
+}
+
+model Reservation {
+  id        Int               @id @default(autoincrement())
+  itemId    Int
+  item      Item              @relation(fields: [itemId], references: [id])
+  userName  String?
+  startAt   DateTime
+  endAt     DateTime
+  status    ReservationStatus @default(APPROVED) // vereinfachend auto-approve
+  note      String?
+  createdAt DateTime          @default(now())
+}
+
+model Loan {
+  id         Int       @id @default(autoincrement())
+  itemId     Int
+  item       Item      @relation(fields: [itemId], references: [id])
+  userName   String?
+  issuedAt   DateTime  @default(now())
+  dueAt      DateTime
+  returnedAt DateTime?
+  note       String?
+}
+
+model AuditLog {
+  id       Int      @id @default(autoincrement())
+  itemId   Int
+  item     Item     @relation(fields: [itemId], references: [id])
+  action   String
+  actor    String?
+  ts       DateTime @default(now())
+}
