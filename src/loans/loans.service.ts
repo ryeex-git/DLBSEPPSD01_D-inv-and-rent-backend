@@ -9,6 +9,19 @@ import { IssueLoanDto } from './dto/issue-load.dto';
 import { ReturnLoanDto } from './dto/return-load.dto';
 import { AuditService } from '../common/audit.service';
 
+/**
+ * Service für Ausleihen (Loans).
+ *
+ * Verantwortlichkeiten:
+ * - **Ausgabe** eines Items (Loan anlegen, Item-Status auf `OUT`, Kollisionsprüfung).
+ * - **Rücknahme** eines Items (Loan schließen, Item-Status auf `OK`).
+ * - Gemeinsame **Überlappungsprüfung** für Zeitintervalle.
+ *
+ * @remarks
+ * - Zeitintervalle werden als **halb-offen** verstanden: `[start, end)`.
+ * - Konsistenz der Statusänderungen (Item ↔ Loan) wird per **DB-Transaktion** sichergestellt.
+ * - Admin-/Authentifizierungslogik liegt **außerhalb** dieses Services (z. B. Guard/Interceptor).
+ */
 @Injectable()
 export class LoansService {
   constructor(
@@ -16,10 +29,36 @@ export class LoansService {
     private audit: AuditService,
   ) {}
 
+  /**
+   * Prüft, ob sich zwei Intervalle schneiden (halb-offen).
+   * @param aStart Start A (inklusive)
+   * @param aEnd   Ende A (exklusive)
+   * @param bStart Start B (inklusive)
+   * @param bEnd   Ende B (exklusive)
+   * @returns `true`, wenn sich A und B überlappen.
+   */
   private overlaps(aStart: Date, aEnd: Date, bStart: Date, bEnd: Date) {
     return aStart < bEnd && aEnd > bStart;
   }
 
+  /**
+   * Gibt ein Item aus (Loan anlegen).
+   *
+   * Validiert:
+   * - Item existiert und ist nicht bereits `OUT`.
+   * - Fälligkeit `dueAt` liegt **nach** `issuedAt` (jetzt).
+   * - Keine Kollision mit **genehmigten Reservierungen** des Items.
+   *
+   * Änderungen (in Transaktion):
+   * - `loan` wird erstellt (`issuedAt`, `dueAt`, optional `note`, `userName`).
+   * - `item.status` → `OUT`.
+   *
+   * Audit: `LOAN_ISSUE`
+   *
+   * @param dto Eingabedaten für die Ausgabe.
+   * @throws BadRequestException bei fehlendem Item, ungültigem Datum oder Konflikt.
+   * @returns Erstellter Loan-Datensatz (Prisma-Entity).
+   */
   async issue(dto: IssueLoanDto) {
     const item = await this.prisma.item.findUnique({
       where: { id: dto.itemId },
@@ -28,11 +67,12 @@ export class LoansService {
     if (item.status === 'OUT')
       throw new BadRequestException('Item already on loan');
 
+    // Ausgabezeitpunkt = jetzt; dueAt aus DTO
     const issuedAt = new Date();
     const dueAt = new Date(dto.dueAt);
     if (!(issuedAt < dueAt)) throw new BadRequestException('Invalid due date');
 
-    // Kollisionen mit bestehenden APPROVED Reservierungen prüfen
+    // Konflikte mit APPROVED-Reservierungen im Zeitraum [issuedAt, dueAt) verhindern
     const res = await this.prisma.reservation.findMany({
       where: { itemId: item.id, status: 'APPROVED' },
     });
@@ -42,6 +82,7 @@ export class LoansService {
       }
     }
 
+    // Konsistente Änderungen: Loan anlegen + Item-Status setzen
     const result = await this.prisma.$transaction(async (tx) => {
       const loan = await tx.loan.create({
         data: {
@@ -60,6 +101,23 @@ export class LoansService {
     return result;
   }
 
+  /**
+   * Nimmt ein Item zurück (offenen Loan schließen).
+   *
+   * Validiert:
+   * - Item existiert.
+   * - Es gibt einen offenen Loan (`returnedAt = null`) für dieses Item.
+   *
+   * Änderungen (in Transaktion):
+   * - Setzt `returnedAt` auf **jetzt**.
+   * - `item.status` → `OK`.
+   *
+   * Audit: `LOAN_RETURN`
+   *
+   * @param dto Rücknahme-DTO (Item-ID).
+   * @throws BadRequestException, wenn Item fehlt oder kein offener Loan vorhanden ist.
+   * @returns Bestätigung mit `loanId` und `returnedAt`.
+   */
   async returnItem(dto: ReturnLoanDto) {
     const item = await this.prisma.item.findUnique({
       where: { id: dto.itemId },

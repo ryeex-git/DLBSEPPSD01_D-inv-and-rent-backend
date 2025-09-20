@@ -46,8 +46,8 @@ export declare class ItemsService {
     } & {
         id: number;
         name: string;
-        status: import("@prisma/client").$Enums.ItemStatus;
         inventoryNo: string;
+        status: import("@prisma/client").$Enums.ItemStatus;
         condition: string;
         categoryId: number | null;
         tagsCsv: string | null;
@@ -55,8 +55,8 @@ export declare class ItemsService {
     create(dto: CreateItemDto): Promise<{
         id: number;
         name: string;
-        status: import("@prisma/client").$Enums.ItemStatus;
         inventoryNo: string;
+        status: import("@prisma/client").$Enums.ItemStatus;
         condition: string;
         categoryId: number | null;
         tagsCsv: string | null;
@@ -64,8 +64,8 @@ export declare class ItemsService {
     update(id: number, dto: UpdateItemDto): Promise<{
         id: number;
         name: string;
-        status: import("@prisma/client").$Enums.ItemStatus;
         inventoryNo: string;
+        status: import("@prisma/client").$Enums.ItemStatus;
         condition: string;
         categoryId: number | null;
         tagsCsv: string | null;
@@ -73,8 +73,8 @@ export declare class ItemsService {
     remove(id: number): Promise<{
         id: number;
         name: string;
-        status: import("@prisma/client").$Enums.ItemStatus;
         inventoryNo: string;
+        status: import("@prisma/client").$Enums.ItemStatus;
         condition: string;
         categoryId: number | null;
         tagsCsv: string | null;

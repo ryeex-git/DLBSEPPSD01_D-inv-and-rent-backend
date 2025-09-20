@@ -8,10 +8,29 @@ import { PrismaService } from '../common/prisma.service';
 import { CreateItemDto, UpdateItemDto } from './dto/create-item.dto';
 import { Prisma } from '@prisma/client';
 
+/**
+ * Service für Items (Inventar).
+ *
+ * Verantwortlichkeiten:
+ * - Lesen/Anlegen/Aktualisieren/Löschen von Items.
+ * - Paginierte Liste mit Filter/Suche/Sortierung.
+ * - Historie (Audit-Logs) und Verfügbarkeits-Zeitachsen (Loans/Reservierungen).
+ *
+ * @remarks
+ * - **Suche:** Für SQLite wird bewusst **ohne** `mode: 'insensitive'` gearbeitet.
+ *   Case-Insensitive je nach DB ggf. per Collation/LOWER-Workaround lösen.
+ * - **Zeitintervalle:** Halb-offen interpretiert `[start, end)`.
+ * - **Transparenz:** `list()` nutzt eine Prisma-Transaktion für Daten + Count.
+ */
 @Injectable()
 export class ItemsService {
   constructor(private prisma: PrismaService) {}
 
+  /**
+   * Prüft, ob ein Item existiert.
+   * @param id Item-ID
+   * @returns `true`, wenn vorhanden.
+   */
   async exists(id: number): Promise<boolean> {
     const x = await this.prisma.item.findUnique({
       where: { id },
@@ -20,18 +39,28 @@ export class ItemsService {
     return !!x;
   }
 
+  /**
+   * Liefert Zeitspannen (Loans/Reservierungen) für die Verfügbarkeitsanzeige eines Items.
+   *
+   * @param itemId Item-ID
+   * @param from   Starttag (inklusive), `YYYY-MM-DD`
+   * @param to     Endtag (exklusive), `YYYY-MM-DD`
+   * @throws Error bei ungültigem Bereich (`from >= to`)
+   * @returns Array vereinheitlichter Spannen { start, end, type, status?, label? }
+   */
   async getAvailability(itemId: number, from: string, to: string) {
     const start = new Date(`${from}T00:00:00.000Z`);
     const end = new Date(`${to}T00:00:00.000Z`);
     if (!(start < end)) throw new Error('Invalid range');
 
+    // Loans, die das Fenster schneiden
     const loans = await this.prisma.loan.findMany({
       where: {
         itemId,
         issuedAt: { lt: end },
         OR: [
-          { returnedAt: { gt: start } },
-          { AND: [{ returnedAt: null }, { dueAt: { gt: start } }] },
+          { returnedAt: { gt: start } }, // bereits zurückgegeben, aber überlappt
+          { AND: [{ returnedAt: null }, { dueAt: { gt: start } }] }, // noch offen
         ],
       },
       select: {
@@ -44,6 +73,7 @@ export class ItemsService {
       orderBy: { issuedAt: 'asc' },
     });
 
+    // Reservierungen, die das Fenster schneiden
     const reservations = await this.prisma.reservation.findMany({
       where: {
         itemId,
@@ -60,6 +90,7 @@ export class ItemsService {
       orderBy: { startAt: 'asc' },
     });
 
+    // In gemeinsames Timeline-Format mappen
     const spans = [
       ...loans.map((l) => ({
         start: l.issuedAt.toISOString(),
@@ -82,6 +113,12 @@ export class ItemsService {
     return spans;
   }
 
+  /**
+   * Liefert eine paginierte Liste von Items inkl. optionaler Filter/Suche/Sortierung.
+   *
+   * @param q Query-Objekt mit page, pageSize, sortBy, sortDir, search, categoryId, status
+   * @returns `{ data, total }` – flache Datensätze fürs Frontend
+   */
   async list(q: {
     page: number;
     pageSize: number;
@@ -105,10 +142,10 @@ export class ItemsService {
       for (const t of terms) {
         AND.push({
           OR: [
-            { name: { contains: t } }, // ⬅️ OHNE mode (SQLite)
+            { name: { contains: t } },
             { inventoryNo: { contains: t } },
             { tagsCsv: { contains: t } },
-            { category: { is: { name: { contains: t } } } }, // Relation filtern
+            { category: { is: { name: { contains: t } } } },
           ],
         });
       }
@@ -139,7 +176,7 @@ export class ItemsService {
         skip,
         take,
       }),
-      this.prisma.item.count({ where }), // ⬅️ kein select/_count hier
+      this.prisma.item.count({ where }),
     ]);
 
     return {
@@ -156,6 +193,11 @@ export class ItemsService {
     };
   }
 
+  /**
+   * Holt ein einzelnes Item inkl. Kategorie.
+   * @param id Item-ID
+   * @throws NotFoundException wenn nicht vorhanden
+   */
   async get(id: number) {
     const it = await this.prisma.item.findUnique({
       where: { id },
@@ -165,20 +207,40 @@ export class ItemsService {
     return it;
   }
 
+  /**
+   * Legt ein Item an.
+   * @param dto Create-DTO
+   */
   async create(dto: CreateItemDto) {
     return this.prisma.item.create({ data: { ...dto } });
   }
 
+  /**
+   * Aktualisiert ein Item.
+   * @param id  Item-ID
+   * @param dto Update-DTO
+   * @throws NotFoundException wenn Item fehlt
+   */
   async update(id: number, dto: UpdateItemDto) {
     await this.get(id);
     return this.prisma.item.update({ where: { id }, data: dto });
   }
 
+  /**
+   * Löscht ein Item.
+   * @param id Item-ID
+   * @throws NotFoundException wenn Item fehlt
+   */
   async remove(id: number) {
     await this.get(id);
     return this.prisma.item.delete({ where: { id } });
   }
 
+  /**
+   * Liefert Audit-Historie zu einem Item (neueste zuerst).
+   * @param id Item-ID
+   * @throws NotFoundException wenn Item fehlt
+   */
   async history(id: number) {
     await this.get(id);
     return this.prisma.auditLog.findMany({

@@ -11,6 +11,19 @@ import { PrismaService } from '../common/prisma.service';
 import { CreateReservationDto } from './dto/create-reservation.dto';
 import { AuditService } from '../common/audit.service';
 
+/**
+ * Service für Reservierungen.
+ *
+ * Verantwortlichkeiten:
+ * - Anlegen von Reservierungen inkl. **Konfliktprüfung** (gegen aktive Ausleihen und genehmigte Reservierungen).
+ * - Auflisten (paginiert, sortiert, gefiltert nach Zeitraum/Status/Suche).
+ * - Statuswechsel **APPROVE** / **CANCEL** inkl. Audit-Log.
+ *
+ * @remarks
+ * - Zeitintervalle werden als **halb-offene Intervalle** verstanden: `[start, end)`.
+ * - Die Volltextsuche nutzt `contains` (Prisma). Je nach DB-Provider kann `mode: 'insensitive'`
+ *   nicht unterstützt sein (z. B. SQLite in älteren Setups) – ggf. auf `LOWER(...)`-Workarounds wechseln.
+ */
 @Injectable()
 export class ReservationsService {
   constructor(
@@ -18,20 +31,43 @@ export class ReservationsService {
     private audit: AuditService,
   ) {}
 
+  /**
+   * Prüft, ob sich zwei Intervalle überlappen (halb-offen).
+   *
+   * @param aStart Start des Intervalls A (inklusive)
+   * @param aEnd   Ende des Intervalls A (exklusive)
+   * @param bStart Start des Intervalls B (inklusive)
+   * @param bEnd   Ende des Intervalls B (exklusive)
+   * @returns `true`, wenn sich A und B schneiden.
+   */
   private overlaps(aStart: Date, aEnd: Date, bStart: Date, bEnd: Date) {
     return aStart < bEnd && aEnd > bStart;
   }
 
+  /**
+   * Legt eine neue Reservierung an.
+   *
+   * Validiert:
+   * - Item existiert.
+   * - Intervall ist gültig (`start < end`).
+   * - Kein Konflikt mit aktiven **Ausleihen** oder bereits **genehmigten Reservierungen**.
+   *
+   * @param dto Eingabedaten (Item, Zeitraum, optional Notiz/Benutzername).
+   * @throws BadRequestException bei ungültigem Intervall, fehlendem Item oder Konflikt.
+   * @returns Die angelegte Reservierung (Prisma-Entity).
+   */
   async create(dto: CreateReservationDto) {
     const item = await this.prisma.item.findUnique({
       where: { id: dto.itemId },
     });
     if (!item) throw new BadRequestException('Item not found');
 
+    // Intervall validieren
     const start = new Date(dto.start);
     const end = new Date(dto.end);
     if (!(start < end)) throw new BadRequestException('Invalid interval');
 
+    // Parallele Abfragen: aktive Loans + genehmigte Reservierungen
     const [loans, res] = await Promise.all([
       this.prisma.loan.findMany({
         where: { itemId: item.id, returnedAt: null },
@@ -41,16 +77,19 @@ export class ReservationsService {
       }),
     ]);
 
+    // Gegen aktive Ausleihen prüfen
     for (const l of loans) {
       const lEnd = l.returnedAt ?? l.dueAt;
       if (this.overlaps(start, end, l.issuedAt, lEnd))
         throw new BadRequestException('Item is on loan');
     }
+    // Gegen genehmigte Reservierungen prüfen
     for (const r of res) {
       if (this.overlaps(start, end, r.startAt, r.endAt))
         throw new BadRequestException('Time slot not available');
     }
 
+    // Vereinfachung: auto-approve beim Anlegen
     const created = await this.prisma.reservation.create({
       data: {
         itemId: item.id,
@@ -65,10 +104,29 @@ export class ReservationsService {
     return created;
   }
 
+  /**
+   * Hilfsfunktion: Baut UTC-Datum `YYYY-MM-DDT00:00:00.000Z`.
+   * @param yyyyMmDd Datum im Format `YYYY-MM-DD`.
+   */
   private toDateDayStart(yyyyMmDd: string) {
     return new Date(`${yyyyMmDd}T00:00:00.000Z`);
   }
 
+  /**
+   * Liefert eine paginierte Liste von Reservierungen.
+   *
+   * Filter:
+   * - `status` (PENDING/APPROVED/CANCELLED)
+   * - Zeitraumfenster `[from, to)` (Überlappung)
+   * - `search` über `userName`, `note`, `item.name`, `item.inventoryNo`
+   *
+   * Sortierung:
+   * - `startAt` (Default), `endAt`, `status`, `itemName`
+   *
+   * @param q Query-Parameter (Seite, Größe, Sortierung, Filter).
+   * @throws BadRequestException bei ungültigem Datumsfenster.
+   * @returns Objekt mit `data` (Zeilen) und `total` (Gesamtanzahl).
+   */
   async list(q: {
     page: number;
     pageSize: number;
@@ -91,6 +149,8 @@ export class ReservationsService {
       const end = q.to ? this.toDateDayStart(q.to) : undefined;
       if (start && end && !(start < end))
         throw new BadRequestException('Invalid range');
+
+      // Prisma-Bedingungen: startAt < end && endAt > start
       const cond: any[] = [];
       if (end) cond.push({ startAt: { lt: end } });
       if (start) cond.push({ endAt: { gt: start } });
@@ -128,6 +188,7 @@ export class ReservationsService {
         break;
     }
 
+    // Daten + Gesamtanzahl parallel holen
     const [rows, total] = await Promise.all([
       this.prisma.reservation.findMany({
         where,
@@ -141,6 +202,7 @@ export class ReservationsService {
       this.prisma.reservation.count({ where }),
     ]);
 
+    // Flaches DTO für das Frontend
     const data = rows.map((r) => ({
       id: r.id,
       itemId: r.itemId,
@@ -156,13 +218,23 @@ export class ReservationsService {
     return { data, total };
   }
 
+  /**
+   * Genehmigt eine Reservierung.
+   *
+   * Vor dem Statuswechsel wird **erneut** auf Konflikte
+   * mit Ausleihen und anderen genehmigten Reservierungen geprüft.
+   *
+   * @param id ID der Reservierung.
+   * @throws NotFoundException wenn Eintrag fehlt.
+   * @throws BadRequestException bei Konflikten oder unzulässigem Statuswechsel.
+   */
   async approve(id: number) {
     const r = await this.prisma.reservation.findUnique({ where: { id } });
     if (!r) throw new NotFoundException('Reservation not found');
     if (r.status === 'CANCELLED')
       throw new BadRequestException('Cancelled reservation cannot be approved');
 
-    // Erneut Overlap prüfen
+    // Erneut Overlap prüfen (Sicherheit, falls sich Bestand zwischenzeitlich änderte)
     const [loans, res] = await Promise.all([
       this.prisma.loan.findMany({ where: { itemId: r.itemId } }),
       this.prisma.reservation.findMany({
@@ -193,6 +265,12 @@ export class ReservationsService {
     );
   }
 
+  /**
+   * Storniert eine Reservierung (Status → `CANCELLED`) und schreibt ein Audit-Log.
+   *
+   * @param id ID der Reservierung.
+   * @throws NotFoundException wenn Eintrag fehlt.
+   */
   async cancel(id: number) {
     const r = await this.prisma.reservation.findUnique({ where: { id } });
     if (!r) throw new NotFoundException('Reservation not found');
